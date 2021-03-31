@@ -1,0 +1,98 @@
+version: "3.4"
+services:
+  redis:
+    image: "redis:6.2"
+    container_name: redis
+    volumes:
+      - "redis_data:/data"
+    networks:
+      app_net:
+        ipv4_address: 172.16.1.11
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  pg:
+    container_name: postgres
+    image: "postgres:13.1"
+    env_file:
+      - .pg.env
+    volumes:
+      - ./volumes/pg/data:/data/postgres
+      - ./pg/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      app_net:
+        ipv4_address: 172.16.1.12
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbit:
+    image: "rabbitmq:3.8"
+    container_name: rabbit
+    hostname: rabbit
+    env_file:
+      - .rabbit.env
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      app_net:
+        ipv4_address: 172.16.1.13
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 30s
+      retries: 3
+
+  sender:
+    image: ${DOCKER_REGISTRY-}block_sender
+    build:
+      context: .
+      dockerfile: ./block-sender/Dockerfile
+    container_name: sender
+    environment:
+      RMQ_CONNECTION: "amqp://admin:admin@172.16.1.13:5672"
+      BLOCK_DELAY_IN_SECONDS: "10"
+    depends_on:
+      - rabbit
+    networks:
+      app_net:
+        ipv4_address: 172.16.1.14
+    restart: on-failure
+
+  processing:
+    image: ${DOCKER_REGISTRY-}block_processing
+    build:
+      context: .
+      dockerfile: ./block-processing/Dockerfile
+    container_name: processing
+    environment:
+      DB_CONNECTION: "Server=172.16.1.12;Port=5432;UserName=postgres;Password=root;Database=datadb;Minimum pool size=50;"
+      RMQ_CONNECTION: "amqp://admin:admin@172.16.1.13:5672"
+      REDIS_CONNECTION: "172.16.1.11:6379,syncTimeout=5000"
+    depends_on:
+      - rabbit
+      - redis
+      - pg
+    networks:
+      app_net:
+        ipv4_address: 172.16.1.15
+    restart: on-failure
+
+networks:
+  app_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: "172.16.1.0/24"
+
+volumes:
+  redis_data:
+    driver: local
